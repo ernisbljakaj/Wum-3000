@@ -7,6 +7,17 @@
 //
 // Nur mit ausdruecklicher Einwilligung der Person an diesem PC verwenden.
 
+// ============================================================
+// >>>>>>>>>>>>>>  HIER IHRE IP EINTRAGEN  <<<<<<<<<<<<<<<<<<<<
+// ============================================================
+// IP-Adresse des PCs, auf dem "server" laeuft (= Ihr PC).
+// Zum Testen auf EINEM PC: "127.0.0.1" stehen lassen.
+// Fuer ZWEI PCs: Ihre echte LAN-IP eintragen, z.B. "192.168.1.42"
+//
+static const char* SERVER_HOST = "127.0.0.1";
+//
+// ============================================================
+
 #include <cstdio>
 #include <cstdint>
 #include <cstring>
@@ -31,6 +42,7 @@
   #include <sys/wait.h>
   #include <netinet/in.h>
   #include <arpa/inet.h>
+  #include <netdb.h>
   #include <unistd.h>
   #include <X11/Xlib.h>
   #include <X11/Xutil.h>
@@ -42,19 +54,18 @@
   static Display* g_dpy = nullptr;
 #endif
 
-// ===================== Konfiguration =====================
-static const char* SERVER_IP     = "192.168.1.100"; // <-- IP des Controllers
-static const int   SERVER_PORT   = 4445;
-static const int   FRAME_SCALE   = 2;    // 1 = volle Aufloesung, 2 = halb
-static const int   FRAME_SLEEP   = 80;   // ms -> ~12 FPS
+// ===================== Fest im Code =====================
+static const int SERVER_PORT = 4445;
+static const int FRAME_SCALE = 2;
+static const int FRAME_SLEEP = 80;
 
 // ===================== Protokoll =====================
 #pragma pack(push, 1)
 struct FrameMsg { uint32_t magic, type, width, height, dataSize; };
 struct InputMsg { uint32_t magic, type; int32_t x, y; uint32_t flags, vk; };
 #pragma pack(pop)
-static const uint32_t MAGIC_FRAME = 0x52444652; // 'RDFR'
-static const uint32_t MAGIC_INPUT = 0x5244494E; // 'RDIN'
+static const uint32_t MAGIC_FRAME = 0x52444652;
+static const uint32_t MAGIC_INPUT = 0x5244494E;
 
 static SOCKET_            g_sock = SOCK_INVALID;
 static std::atomic<bool>  g_running{true};
@@ -71,20 +82,17 @@ static bool AskConsent() {
         MB_YESNO | MB_ICONQUESTION | MB_DEFBUTTON2);
     return r == IDYES;
 #else
-    // 1) Pruefen, ob xmessage verfuegbar ist
     int has = system("command -v xmessage >/dev/null 2>&1");
     if (has != -1 && WIFEXITED(has) && WEXITSTATUS(has) == 0) {
-        // 2) Grafischer Dialog: Ja -> 0, Nein -> 1
         int rc = system(
             "xmessage -center -buttons 'Ja:0,Nein:1' "
             "'Remote-Zugriff auf diesen PC erlauben?' >/dev/null 2>&1");
         if (rc != -1 && WIFEXITED(rc)) {
             int code = WEXITSTATUS(rc);
-            if (code == 0) return true;   // Ja
-            if (code == 1) return false;  // Nein
+            if (code == 0) return true;
+            if (code == 1) return false;
         }
     }
-    // 3) Fallback: Terminal-Prompt
     fputs("Remote-Zugriff auf diesen PC erlauben? (y/n): ", stderr);
     fflush(stderr);
     char c = 0;
@@ -348,14 +356,23 @@ int main() {
     g_sock = socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);
     if (g_sock == SOCK_INVALID) { fprintf(stderr, "socket fehlgeschlagen\n"); return 1; }
 
-    sockaddr_in srv = {0};
-    srv.sin_family = AF_INET;
-    srv.sin_port   = htons(SERVER_PORT);
-    inet_pton(AF_INET, SERVER_IP, &srv.sin_addr);
-    if (connect(g_sock, (sockaddr*)&srv, sizeof(srv)) != 0) {
-        fprintf(stderr, "Verbindung zu %s:%d fehlgeschlagen\n", SERVER_IP, SERVER_PORT);
+    addrinfo hints = {0};
+    hints.ai_family   = AF_INET;
+    hints.ai_socktype = SOCK_STREAM;
+    char portStr[16];
+    snprintf(portStr, sizeof(portStr), "%d", SERVER_PORT);
+
+    addrinfo* res = nullptr;
+    if (getaddrinfo(SERVER_HOST, portStr, &hints, &res) != 0 || !res) {
+        fprintf(stderr, "Host '%s' konnte nicht aufgeloest werden\n", SERVER_HOST);
         CLOSESOCK(g_sock); return 1;
     }
+    if (connect(g_sock, res->ai_addr, (int)res->ai_addrlen) != 0) {
+        fprintf(stderr, "Verbindung zu %s:%d fehlgeschlagen\n", SERVER_HOST, SERVER_PORT);
+        freeaddrinfo(res); CLOSESOCK(g_sock); return 1;
+    }
+    freeaddrinfo(res);
+    fprintf(stderr, "[client] verbunden mit %s:%d\n", SERVER_HOST, SERVER_PORT);
     g_connected = true;
 
 #ifdef _WIN32
