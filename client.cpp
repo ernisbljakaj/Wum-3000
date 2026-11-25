@@ -1,6 +1,6 @@
 // client.cpp - Remote Desktop Agent (Windows + Linux)
 //
-// Build Linux:            g++ -O2 client.cpp -o client -lX11 -lXtst -lpthread
+// Build Linux:             g++ -O2 client.cpp -o client -lX11 -lXtst -lpthread
 // Build Windows (native):  g++ -O2 client.cpp -o client.exe -lws2_32 -lole32
 // Build von Linux -> Win:  x86_64-w64-mingw32-g++ -O2 -static client.cpp -o client.exe \
 //                          -lws2_32 -lole32 -lwinpthread
@@ -11,6 +11,7 @@
 #include <cstdint>
 #include <cstring>
 #include <csignal>
+#include <cstdlib>
 #include <vector>
 #include <thread>
 #include <atomic>
@@ -27,6 +28,7 @@
   #define CLOSESOCK    closesocket
 #else
   #include <sys/socket.h>
+  #include <sys/wait.h>
   #include <netinet/in.h>
   #include <arpa/inet.h>
   #include <unistd.h>
@@ -69,18 +71,25 @@ static bool AskConsent() {
         MB_YESNO | MB_ICONQUESTION | MB_DEFBUTTON2);
     return r == IDYES;
 #else
-    const char* msg =
-        "Ein Remote-Desktop-Controller moechte auf diesen PC zugreifen.\n"
-        "Bildschirm wird uebertragen, Maus/Tastatur ferngesteuert.\n"
-        "Zustimmen? (y/n): ";
-    if (isatty(0)) {
-        fputs(msg, stderr); fflush(stderr);
-        char c; if (scanf(" %c", &c) != 1) return false;
-        return c == 'y' || c == 'Y';
+    // 1) Pruefen, ob xmessage verfuegbar ist
+    int has = system("command -v xmessage >/dev/null 2>&1");
+    if (has != -1 && WIFEXITED(has) && WEXITSTATUS(has) == 0) {
+        // 2) Grafischer Dialog: Ja -> 0, Nein -> 1
+        int rc = system(
+            "xmessage -center -buttons 'Ja:0,Nein:1' "
+            "'Remote-Zugriff auf diesen PC erlauben?' >/dev/null 2>&1");
+        if (rc != -1 && WIFEXITED(rc)) {
+            int code = WEXITSTATUS(rc);
+            if (code == 0) return true;   // Ja
+            if (code == 1) return false;  // Nein
+        }
     }
-    int rc = system("xmessage -center -buttons 'Ja:0,Nein:1' "
-                    "'Remote-Zugriff auf diesen PC erlauben?' >/dev/null 2>&1");
-    return WIFEXITED(rc) && WEXITSTATUS(rc) == 0;
+    // 3) Fallback: Terminal-Prompt
+    fputs("Remote-Zugriff auf diesen PC erlauben? (y/n): ", stderr);
+    fflush(stderr);
+    char c = 0;
+    if (scanf(" %c", &c) != 1) return false;
+    return c == 'y' || c == 'Y';
 #endif
 }
 
@@ -291,7 +300,10 @@ static void CaptureThread() {
     std::vector<uint8_t> full, scaled;
     int fw, fh, sw, sh;
     while (g_running && g_connected) {
-        if (!CaptureScreen(full, fw, fh)) { std::this_thread::sleep_for(std::chrono::milliseconds(100)); continue; }
+        if (!CaptureScreen(full, fw, fh)) {
+            std::this_thread::sleep_for(std::chrono::milliseconds(100));
+            continue;
+        }
         Downscale(full, fw, fh, scaled, sw, sh);
         if (scaled.empty()) continue;
         FrameMsg fm;
